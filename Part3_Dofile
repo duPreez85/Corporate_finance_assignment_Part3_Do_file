@@ -1,0 +1,228 @@
+*****		NOTES		*****
+//
+//
+//
+
+
+
+*****		SETTINGS		*****
+clear
+cls
+cd "/Users/raoul/Desktop/Finance and Investments/1.8 Research skills/assignment/Assignment part 3"
+ssc install asdoc
+
+
+
+*****		SAVE DATA AS DTA. FILES		*****
+//import event study file
+import excel "Event Study.xlsx", firstrow clear
+format AnnouncementDate %td
+
+// save data file
+save "Event Study.dta", replace
+
+// import factor file
+import delimited "F-F_Research_Data_Factors_daily.csv", varnames(1) clear
+gen date2 = date(date, "YMD")
+format date2 %td
+drop date
+rename date2 date
+drop if date ==.
+
+// save data file
+save "Factor Returns.dta", replace
+*
+*
+*
+*
+*
+
+*****		AFTER DTA-FILES ARE CREATED		*****
+
+clear
+cd "/Users/raoul/Desktop/Finance and Investments/1.8 Research skills/assignment/Assignment part 3"
+
+//transform sting values into real values and creating consistent date values
+
+
+
+*****		MERGE STOCK DATA TO FACTOR RETURN DATA		*****
+//open stock returns data
+use "Stock Returns.dta", clear
+// merge factor returns to master file 
+merge m:1 date using "Factor Returns.dta"
+
+// drop observations that got merged from the merge file, but does not exist in the master file
+drop if _merge == 2
+drop _merge
+
+// convert factor returns from percentage format to decimal format
+replace mktrf = mktrf / 100
+replace smb = smb / 100
+replace hml = hml / 100
+replace rf = rf / 100
+
+//Check for missing values
+mdesc
+
+// drop missing return values 
+drop if RET == .
+
+// save data file
+save "Stock and Factor Returns.dta", replace
+
+
+
+*****		MERGE SEO DATA WITH RETURN DATA		*****
+
+//open SEO data
+use "Event Study.dta", clear
+merge 1:m CUSIP using "Stock and Factor Returns.dta"
+
+// drop unmerged observations
+drop if _merge == 1 | _merge == 2
+drop _merge
+
+//sort data set
+sort CUSIP date
+
+save "Master file.dta", replace
+
+
+
+*****		EVENT STUDY		*****
+
+//open data
+use "Master File.dta"
+
+/*
+for the subsamples of either overleveraged or underleveraged firms,
+some adjustments were made to the code in identicle .do-files
+in the subsample of overleveraged firms (underleveraged firms), the code "drop if D_Over ==0" ("drop if D_Over ==1") was used in this position.
+additionally, the Number of firms = 24 was altered where it had been hard-coded in sebsequent lines to reflect the new number of firms in the sample, namely 14 (10).
+This occured in the generation of SD_AAR, SE_AAR & C_S_t_test
+*/
+
+//Order variables
+order AnnouncementDate, after(date)
+
+//get difference in dates relative to anncounement date based on trading days
+sort CUSIP date
+by CUSIP: gen datenum =_n
+by CUSIP: gen target = datenum if date == AnnouncementDate
+egen target_date = min(target), by(CUSIP)
+drop target
+gen date_dif = datenum - target_date
+
+// based on calendar days
+// gen date_dif = date_stata - announcement
+
+// get estimation and event windows
+by CUSIP: gen event_window = 1 if date_dif >= -3 & date_dif <= 3
+replace event_window = 0 if event_window == .
+by CUSIP: gen estimation_window = 1 if date_dif >= -130 & date_dif < -30
+replace estimation_window = 0 if estimation_window == . 
+
+// remove event for which the number of observations does not cover the full window
+egen count_event_obs = sum(event_window), by(CUSIP)
+egen count_est_obs = sum(estimation_window), by(CUSIP)
+drop if count_event_obs < 7
+drop if count_est_obs < 100
+
+
+
+*****		ABNORMAL RETURNS		*****
+
+//Expected returns according to a model
+gen expected_return = .
+gen residual = .
+levels CUSIP
+foreach i in `r(levels)' {
+	quiet reg RET mktrf if CUSIP == "`i'" & estimation_window == 1 
+	predict preturn if CUSIP == "`i'"
+	predict resid if CUSIP == "`i'", resid
+	replace expected_return = preturn if CUSIP == "`i'" & event_window == 1
+	replace residual = resid if CUSIP == "`i'" & estimation_window == 1
+	drop preturn
+	drop resid
+}
+
+// CAR
+sort CUSIP date
+gen AR = RET - expected_return if event_window == 1
+egen CAR = sum(AR), by(CUSIP)
+
+// significance for CAR
+sort CUSIP date
+egen AR_standard_deviation = sd(residual), by(CUSIP)
+gen CAR_standard_deviation = sqrt(7) * AR_standard_deviation
+gen test = CAR/CAR_standard_deviation
+
+
+
+// list CAR and test
+list CUSIP NAME D_Over CAR test if date_dif == 0
+
+// export to excel
+export excel CUSIP NAME AnnouncementDate D_Over CAR CAR_standard_deviation test using "Results - CARs test.xls" if date_dif == 0, firstrow(variables) replace
+
+
+
+*****		TIME SERIES GRAPH AND CROSS-SECTIONAL SIGNIFICANCE		*****
+
+//To generate a timeseries plot of AAR with 
+egen AAR_m3 = mean(AR) if date_dif ==-3
+egen AAR_m2 = mean(AR) if date_dif ==-2
+egen AAR_m1 = mean(AR) if date_dif ==-1
+egen AAR_zero = mean(AR) if date_dif ==0
+egen AAR_p1 = mean(AR) if date_dif ==1
+egen AAR_p2 = mean(AR) if date_dif ==2
+egen AAR_p3 = mean(AR) if date_dif ==3
+
+replace AAR_m3 = 0 if AAR_m3 ==.
+replace AAR_m2 = 0 if AAR_m2 ==.
+replace AAR_m1 = 0 if AAR_m1 ==.
+replace AAR_zero = 0 if AAR_zero ==.
+replace AAR_p1 = 0 if AAR_p1 ==.
+replace AAR_p2 = 0 if AAR_p2 ==.
+replace AAR_p3 = 0 if AAR_p3 ==.
+
+//add the average abnormal return variables to create one variable that holds all AAR variables duplicated by CUSIP
+gen AAR = AAR_m3 + AAR_m2 + AAR_m1 + AAR_zero + AAR_p1 + AAR_p2 + AAR_p3
+
+//Create the standard deviation and Standard error for AAR 
+gen SD_AAR_1 =(AR-AAR)^2
+egen SD_AAR_2 = sum(SD_AAR_1), by(date_dif)
+gen SD_AAR = sqrt(SD_AAR_2/(24-1))
+gen SE_AAR = SD_AAR/sqrt(24)
+
+//Perform cross sectional t-test of AAR per period
+gen C_S_t_test = sqrt(24)*AAR/SD_AAR
+
+//generate confidence interval for AAR
+gen Upper_95_CI = AAR + 2.447*SE_AAR
+gen Lower_95_CI	= AAR - 2.447*SE_AAR
+
+
+//constuct a time-series plot of the average abnormal return on each day in the event window using the full sample
+line AAR Upper_95_CI Lower_95_CI date_dif if event_window ==1 & PERMNO ==11308,  ytitle(Average abnormal return) xtitle(Event Window) ti(Event Study - AAR during SEO event) xlabel(-3(1)3) ylabel(-0.01(0.01)0.01) lpattern("1" "-" "-.") 
+graph export "Event_Study_plot.png", replace
+
+//calculate CAAR
+egen CAAR1 = sum(AAR) if PERMNO ==11308
+egen CAAR = mean (CAAR1)
+drop CAAR1
+//Regress CARs on D_Over
+asdoc reg CAR D_Over if date_dif ==0
+
+//AAR time series plots, CAAR t-stats 
+asdoc list NAME D_Over CAR CAR_standard_deviation test if date_dif==0
+asdoc list date_dif AAR SE_AAR C_S_t_test if PERMNO ==11308 & event_window==1
+
+
+
+
+
+
+
+
